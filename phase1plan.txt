@@ -1,0 +1,19 @@
+BLE Scanner
+│
+├── Scan Manager
+│   ├── Start scanning
+│   ├── Stop scanning
+│   └── Handle discovered devices
+│
+├── Device Information
+│   ├── Device name
+│   ├── Address
+│   ├── RSSI
+│   ├── Manufacturer data
+│   └── Service UUIDs
+│
+└── User Interface
+    ├── Device list
+    ├── Signal strength
+    └── Refresh / scan controls i wanna make BLE PLATFORM THAT DETECTS NEARBY BLUETTOTH DEVICES.
+
