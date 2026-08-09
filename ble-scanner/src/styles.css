@@ -1,15 +1,15 @@
 :root {
-  --bg: #0f1220;
-  --bg-elev: #23273d;
-  --bg-elev-2: #1f2440;
-  --border: #ebebeb;
+  --bg: #000000;
+  --bg-elev: #1a1a1a;
+  --bg-elev-2: #242424;
+  --border: #3a3a3a;
   --text: #ffffff;
-  --text-dim: #8b91b5;
-  --accent: #020a18;
-  --accent-strong: #010306;
-  --danger: #ff5d6c;
-  --success: #00f767;
-  --warn: #f1c40f;
+  --text-dim: #8a8a8a;
+  --accent: #1f1f1f;
+  --accent-strong: #000000;
+  --danger: #7a7a7a;
+  --success: #ffffff;
+  --warn: #6f6f6f;
 
   font-family: "Segoe UI", Inter, Avenir, Helvetica, Arial, sans-serif;
   font-size: 15px;
@@ -25,7 +25,7 @@
 body {
   margin: 0;
   min-height: 100vh;
-  background: radial-gradient(1200px 600px at 50% -10%, #1b2140 0%, var(--bg) 60%);
+  background: radial-gradient(1200px 600px at 50% -10%, #1a1a1a 0%, var(--bg) 60%);
 }
 
 .app {
@@ -58,8 +58,8 @@ body {
   font-size: 22px;
   font-weight: 700;
   color: #fff;
-  background: linear-gradient(135deg, var(--accent) 0%, #7c5cff 100%);
-  box-shadow: 0 6px 20px rgba(79, 140, 255, 0.35);
+  background: linear-gradient(135deg, var(--accent) 0%, #5c5c5c 100%);
+  box-shadow: 0 6px 20px rgba(255, 255, 255, 0.15);
 }
 
 h1 {
@@ -110,9 +110,9 @@ h1 {
 }
 
 .pill.on {
-  color: #b9ffd2;
+  color: #ffffff;
   border-color: var(--success);
-  background: rgba(46, 204, 113, 0.12);
+  background: rgba(255, 255, 255, 0.12);
   animation: pulse 1.6s ease-in-out infinite;
 }
 
@@ -157,12 +157,13 @@ h1 {
 .btn-primary {
   background: var(--accent-strong);
   color: #fff;
-  box-shadow: 0 4px 14px rgba(47, 107, 221, 0.35);
+  border: 1px solid var(--border);
+  box-shadow: 0 4px 14px rgba(255, 255, 255, 0.15);
 }
 
 .btn-primary.danger {
   background: var(--danger);
-  box-shadow: 0 4px 14px rgba(255, 93, 108, 0.35);
+  box-shadow: 0 4px 14px rgba(122, 122, 122, 0.35);
 }
 
 .btn-ghost {
@@ -296,7 +297,7 @@ h1 {
 }
 
 .chip-uuid {
-  color: #a7b3e8;
+  color: #d4d4d4;
 }
 
 @keyframes pulse {
