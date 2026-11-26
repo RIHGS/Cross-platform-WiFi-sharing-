@@ -1,0 +1,9 @@
+{
+  "name": "wifi-sharing",
+  "private": true,
+  "scripts": {
+    "tauri": "npm --prefix ble-scanner run tauri",
+    "dev": "npm --prefix ble-scanner run dev",
+    "build": "npm --prefix ble-scanner run build"
+  }
+}
