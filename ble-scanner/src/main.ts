@@ -82,15 +82,11 @@ function timeAgo(lastSeen: number): string {
 
 function deviceCard(d: BleDevice): string {
   const hasName = !!(d.name && d.name.trim());
-  const title = hasName
-    ? escapeHtml(d.name!.trim())
-    : d.address
-      ? escapeHtml(d.address)
-      : "Unknown device";
+  const title = hasName ? escapeHtml(d.name!.trim()) : "Unknown device";
   const rssi = d.rssi === null || d.rssi === undefined ? "&mdash;" : `${d.rssi} dBm`;
   const bars = rssiBars(d.rssi);
 
-  const desc = hasName && d.address ? escapeHtml(d.address) : "";
+  const desc = d.address ? escapeHtml(d.address) : "";
 
   const mfg = d.manufacturerData
     .map(

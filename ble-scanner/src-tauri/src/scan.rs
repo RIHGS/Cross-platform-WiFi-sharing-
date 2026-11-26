@@ -1,7 +1,7 @@
 use btleplug::api::{
     Central as _, CentralEvent, Manager as _, Peripheral as _, PeripheralProperties, ScanFilter,
 };
-use btleplug::platform::{Adapter, Manager, PeripheralId};
+use btleplug::platform::{Adapter, Manager, Peripheral, PeripheralId};
 use futures::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,6 +12,16 @@ use uuid::Uuid;
 
 const DEVICE_TIMEOUT_SECS: u64 = 60;
 const PRUNE_INTERVAL_SECS: u64 = 3;
+const NAME_RETRY_SECS: u64 = 15;
+const NAME_MAX_ATTEMPTS: u32 = 4;
+const NAME_CONNECT_TIMEOUT_SECS: u64 = 10;
+const NAME_LOOKUP_TIMEOUT_SECS: u64 = 5;
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct NameAttempt {
+    last_ms: u64,
+    count: u32,
+}
 
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -47,7 +57,7 @@ pub struct ScanManager {
     pub cancel: tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     pub adapter: tokio::sync::Mutex<Option<Adapter>>,
     pub name_in_flight: Arc<tokio::sync::Mutex<HashSet<String>>>,
-    pub name_tried: Arc<tokio::sync::Mutex<HashSet<String>>>,
+    pub name_tried: Arc<tokio::sync::Mutex<HashMap<String, NameAttempt>>>,
 }
 
 impl ScanManager {
@@ -59,7 +69,7 @@ impl ScanManager {
             cancel: tokio::sync::Mutex::new(None),
             adapter: tokio::sync::Mutex::new(None),
             name_in_flight: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
-            name_tried: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
+            name_tried: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 }
@@ -121,7 +131,10 @@ async fn handle_device(
 
     let id_str = id.to_string();
     let mut map = cache.lock().await;
-    if let Some(device) = device {
+    if let Some(mut device) = device {
+        if device.name.is_none() {
+            device.name = map.get(&id_str).and_then(|d| d.name.clone());
+        }
         let is_new = !map.contains_key(&id_str);
         if is_new {
             let _ = app.emit("ble://device", device.clone());
@@ -147,6 +160,66 @@ async fn handle_device(
     }
 }
 
+#[cfg(target_os = "windows")]
+async fn system_device_name(address: u64) -> Option<String> {
+    let lookup = tokio::task::spawn_blocking(move || {
+        use windows::Devices::Bluetooth::BluetoothLEDevice;
+
+        let device = BluetoothLEDevice::FromBluetoothAddressAsync(address)
+            .ok()?
+            .get()
+            .ok()?;
+        let name = device.Name().ok()?.to_string();
+        let _ = device.Close();
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            None
+        } else {
+            Some(name)
+        }
+    });
+
+    match tokio::time::timeout(Duration::from_secs(NAME_LOOKUP_TIMEOUT_SECS), lookup).await {
+        Ok(Ok(name)) => name,
+        _ => None,
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn system_device_name(_address: u64) -> Option<String> {
+    None
+}
+
+async fn read_gatt_name(peripheral: &Peripheral) -> Option<String> {
+    tokio::time::timeout(
+        Duration::from_secs(NAME_CONNECT_TIMEOUT_SECS),
+        peripheral.discover_services(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+
+    for service in peripheral.services() {
+        for ch in service.characteristics {
+            if ch.uuid != Uuid::from_u128(0x2a00) {
+                continue;
+            }
+            let data = tokio::time::timeout(
+                Duration::from_secs(NAME_LOOKUP_TIMEOUT_SECS),
+                peripheral.read(&ch),
+            )
+            .await
+            .ok()?
+            .ok()?;
+            return String::from_utf8(data)
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+        }
+    }
+    None
+}
+
 async fn resolve_device_name(
     adapter: Adapter,
     cache: Arc<tokio::sync::Mutex<HashMap<String, BleDevice>>>,
@@ -165,34 +238,31 @@ async fn resolve_device_name(
         return;
     };
 
-    let resolved = if peripheral.connect().await.is_ok() {
-        let mut name = None;
-        if peripheral.discover_services().await.is_ok() {
-            'outer: for service in peripheral.services() {
-                for ch in service.characteristics {
-                    if ch.uuid == Uuid::from_u128(0x2a00) {
-                        if let Ok(data) = peripheral.read(&ch).await {
-                            name = String::from_utf8(data)
-                                .ok()
-                                .map(|s| s.trim().to_string())
-                                .filter(|s| !s.is_empty());
-                        }
-                        break 'outer;
-                    }
-                }
-            }
+    let mut resolved = system_device_name(peripheral.address().into()).await;
+
+    if resolved.is_none() {
+        let connected = tokio::time::timeout(
+            Duration::from_secs(NAME_CONNECT_TIMEOUT_SECS),
+            peripheral.connect(),
+        )
+        .await
+        .map(|r| r.is_ok())
+        .unwrap_or(false);
+
+        if connected {
+            resolved = read_gatt_name(&peripheral).await;
+            let _ = tokio::time::timeout(Duration::from_secs(2), peripheral.disconnect()).await;
         }
-        let _ = peripheral.disconnect().await;
-        name
-    } else {
-        None
-    };
+    }
 
     if let Some(name) = resolved {
         let mut map = cache.lock().await;
         if let Some(dev) = map.get_mut(&id_str) {
-            dev.name = Some(name);
-            let _ = app.emit("ble://device-updated", dev.clone());
+            let needs_name = dev.name.as_deref().map_or(true, |n| n.trim().is_empty());
+            if needs_name {
+                dev.name = Some(name);
+                let _ = app.emit("ble://device-updated", dev.clone());
+            }
         }
     }
 
@@ -203,7 +273,7 @@ async fn maybe_resolve_name(
     adapter: &Adapter,
     cache: &Arc<tokio::sync::Mutex<HashMap<String, BleDevice>>>,
     name_in_flight: &Arc<tokio::sync::Mutex<HashSet<String>>>,
-    name_tried: &Arc<tokio::sync::Mutex<HashSet<String>>>,
+    name_tried: &Arc<tokio::sync::Mutex<HashMap<String, NameAttempt>>>,
     app: &AppHandle,
     id: &PeripheralId,
 ) {
@@ -212,18 +282,28 @@ async fn maybe_resolve_name(
     {
         let map = cache.lock().await;
         match map.get(&id_str) {
-            Some(d) if d.name.is_none() => {}
+            Some(d) if d.name.as_deref().map_or(true, |n| n.trim().is_empty()) => {}
             _ => return,
         }
     }
 
-    let mut tried = name_tried.lock().await;
-    if !tried.insert(id_str.clone()) {
+    let now = now_millis();
+    {
+        let mut attempts = name_tried.lock().await;
+        let attempt = attempts.entry(id_str.clone()).or_default();
+        if attempt.count >= NAME_MAX_ATTEMPTS {
+            return;
+        }
+        if attempt.count > 0 && now.saturating_sub(attempt.last_ms) < NAME_RETRY_SECS * 1000 {
+            return;
+        }
+        attempt.last_ms = now;
+        attempt.count += 1;
+    }
+
+    if !name_in_flight.lock().await.insert(id_str.clone()) {
         return;
     }
-    drop(tried);
-
-    name_in_flight.lock().await.insert(id_str.clone());
 
     let id_owned = id.clone();
     let adapter = adapter.clone();
@@ -337,6 +417,8 @@ pub async fn start_scan(
         let mut cache = state.cache.lock().await;
         cache.clear();
     }
+    state.name_in_flight.lock().await.clear();
+    state.name_tried.lock().await.clear();
     let _ = app.emit("ble://cleared", ());
 
     let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
