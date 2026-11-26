@@ -31,3 +31,26 @@ target
 # OS
 Thumbs.db
 Desktop.ini
+
+# Secrets, env files & local credentials
+.env
+.env.*
+!.env.example
+.envrc
+secrets.*
+credentials.*
+*.secret
+
+# Private keys & certificates (Tauri signing, code signing, etc.)
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.mobileprovision
+*.provisionprofile
+.tauri/
+
+# Daemon runtime config (contains paired device + shared_secret)
+.config/hotspotlink/
