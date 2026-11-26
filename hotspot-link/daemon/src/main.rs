@@ -1,67 +1,59 @@
-use std::net::SocketAddr;
-use tokio::net::TcpListener;
-use tokio::io::AsyncReadExt;
-use tokio::io::AsyncWriteExt;
-use clap::Parser;
-
 mod cli;
 mod config;
 mod ipc;
+mod pairing;
+mod state;
 
-#[derive(Parser)]
-#[command(name = "hotspotlinkd")]
-struct Cli {
-    #[command(subcommand)]
-    command: Option<Commands>,
-}
+use clap::Parser;
+use cli::{Cli, Command};
+use config::Config;
+use state::DaemonState;
+use std::error::Error;
+use std::net::SocketAddr;
+use std::process::ExitCode;
 
-#[derive(clap::Subcommand)]
-enum Commands {
-    Status,
-    Pair,
-    Forget,
-}
+type DaemonResult = Result<(), Box<dyn Error + Send + Sync>>;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> ExitCode {
     let cli = Cli::parse();
-    let config = config::Config::load().await.unwrap_or_default();
 
-    match cli.command {
-        Some(Commands::Status) => {
-            println!("daemon running, config loaded: {:?}", config);
+    let result = match cli.command {
+        None | Some(Command::Run) => run_daemon(cli.ipc_addr).await,
+        Some(Command::Status) => cli::status(cli.ipc_addr).await,
+        Some(Command::Pair) => cli::pair(cli.ipc_addr).await,
+        Some(Command::Forget) => cli::forget(cli.ipc_addr).await,
+    };
+
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("error: {error}");
+            ExitCode::FAILURE
         }
-        Some(Commands::Pair) => {
-            println!("PIN: 123456");
-            println!("Scan QR code or enter PIN in phone app to pair");
+    }
+}
+
+async fn run_daemon(addr: SocketAddr) -> DaemonResult {
+    let config_path = Config::path();
+    let config = match Config::load() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("warning: {error}; starting with default configuration");
+            Config::default()
         }
-        Some(Commands::Forget) => {
-            println!("Forgot paired device");
-        }
-        None => {
-            // Run as daemon with TCP IPC socket
-            start_ipc_server().await?;
-        }
+    };
+
+    println!("hotspotlinkd v{}", env!("CARGO_PKG_VERSION"));
+    println!("config: {}", config_path.display());
+    println!("paired: {}", if config.paired { "yes" } else { "no" });
+
+    let state = DaemonState::with_path(config, config_path);
+
+    tokio::select! {
+        result = ipc::serve(addr, state) => result?,
+        _ = tokio::signal::ctrl_c() => println!("shutting down"),
     }
 
     Ok(())
-}
-
-async fn start_ipc_server() -> Result<(), Box<dyn std::error::Error>> {
-    let listener = TcpListener::bind("127.0.0.1:45678").await?;
-    println!("IPC server listening on 127.0.0.1:45678");
-
-    loop {
-        let (mut socket, _) = listener.accept().await?;
-        tokio::spawn(async move {
-            let mut buf = [0u8; 4096];
-            if let Ok(n) = socket.read(&mut buf).await {
-                let msg = String::from_utf8_lossy(&buf[..n]).trim().to_string();
-                if msg == "status" {
-                    let response = "daemon running";
-                    let _ = socket.write(response.as_bytes()).await;
-                }
-            }
-        });
-    }
 }
