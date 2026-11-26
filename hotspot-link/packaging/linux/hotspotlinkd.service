@@ -1,0 +1,11 @@
+[Unit]
+Description=HotspotLink background daemon
+After=network.target bluetooth.target
+
+[Service]
+ExecStart=%h/.local/bin/hotspotlinkd
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

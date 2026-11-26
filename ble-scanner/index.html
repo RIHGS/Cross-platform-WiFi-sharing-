@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>BLE Scanner</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+
+  <body>
+    <main class="app">
+      <header class="header">
+        <div class="brand">
+          <div class="logo" aria-hidden="true">B</div>
+          <div>
+            <h1>BLE Scanner</h1>
+            <p class="adapter">
+              Adapter: <span id="adapter-name">Detecting&hellip;</span>
+              <span id="adapter-status" class="status-dot off" title="Adapter unavailable"></span>
+            </p>
+          </div>
+        </div>
+        <div class="scan-state">
+          <span id="scanning-pill" class="pill off">Idle</span>
+          <span id="device-count" class="count">0 devices</span>
+        </div>
+      </header>
+
+      <section class="controls">
+        <button id="btn-scan" class="btn btn-primary">Start Scan</button>
+        <button id="btn-clear" class="btn btn-ghost">Clear</button>
+      </section>
+
+      <section id="device-list" class="device-list" aria-live="polite">
+        <div id="empty-state" class="empty">
+          <p>No devices found</p>
+          <span id="empty-hint">Press <strong>Start Scan</strong> to look for nearby Bluetooth devices.</span>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>
