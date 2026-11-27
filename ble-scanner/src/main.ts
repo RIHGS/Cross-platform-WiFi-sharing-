@@ -14,6 +14,7 @@ interface BleDevice {
   txPower: number | null;
   manufacturerData: ManufacturerData[];
   serviceUuids: string[];
+  paired: boolean;
   lastSeen: number;
 }
 
@@ -36,6 +37,7 @@ const COMPANY_IDS: Record<number, string> = {
 };
 
 const devices = new Map<string, BleDevice>();
+const pending = new Set<string>();
 let scanning = false;
 
 const listEl = document.getElementById("device-list") as HTMLElement;
@@ -101,6 +103,16 @@ function deviceCard(d: BleDevice): string {
     .map((u) => `<span class="chip chip-uuid">${escapeHtml(u)}</span>`)
     .join("");
 
+  const busy = pending.has(d.id);
+  const action = d.paired
+    ? `<span class="badge">Paired</span>
+       <button class="btn btn-sm btn-ghost" data-action="unpair" data-id="${escapeHtml(d.id)}" ${busy ? "disabled" : ""}>
+         ${busy ? "Unpairing&hellip;" : "Unpair"}
+       </button>`
+    : `<button class="btn btn-sm btn-primary" data-action="pair" data-id="${escapeHtml(d.id)}" ${busy ? "disabled" : ""}>
+         ${busy ? "Pairing&hellip;" : "Pair"}
+       </button>`;
+
   return `
     <article class="device ${d.rssi === null ? "weak" : ""}">
       <div class="signal">
@@ -119,6 +131,7 @@ function deviceCard(d: BleDevice): string {
         </p>
         ${mfg ? `<div class="chips">${mfg}</div>` : ""}
         ${uuids ? `<div class="chips">${uuids}</div>` : ""}
+        <div class="actions">${action}</div>
       </div>
     </article>`;
 }
@@ -130,6 +143,8 @@ function cardFingerprint(d: BleDevice): string {
     r: d.rssi,
     m: d.manufacturerData,
     s: d.serviceUuids,
+    p: d.paired,
+    b: pending.has(d.id),
   });
 }
 
@@ -147,6 +162,35 @@ function updateSlot(el: HTMLElement, d: BleDevice) {
   if (el.dataset.fp !== fp) {
     el.dataset.fp = fp;
     el.innerHTML = deviceCard(d);
+  }
+}
+
+function refreshSlot(d: BleDevice) {
+  const el = document.getElementById(`dev-${d.id}`);
+  if (el) updateSlot(el, d);
+}
+
+async function togglePair(id: string, action: "pair" | "unpair") {
+  const current = devices.get(id);
+  if (!current || pending.has(id)) return;
+
+  pending.add(id);
+  refreshSlot(current);
+
+  try {
+    if (action === "pair") {
+      const updated = await invoke<BleDevice>("pair_device", { id });
+      devices.set(id, updated);
+    } else {
+      await invoke("unpair_device", { id });
+      devices.set(id, { ...current, paired: false });
+    }
+  } catch (error) {
+    alert(`Failed to ${action === "pair" ? "pair" : "unpair"} device: ${error}`);
+  } finally {
+    pending.delete(id);
+    const latest = devices.get(id);
+    if (latest) refreshSlot(latest);
   }
 }
 
@@ -204,7 +248,8 @@ function setScanning(state: boolean) {
     hintEl.innerHTML =
       "Phones only advertise in short bursts. On Android, keep the screen on and open " +
       "<em>Settings &gt; Connected devices</em>. On iPhone, just keep the screen on. " +
-      "If the phone was previously paired with this PC, unpair it — Windows hides paired devices from scans.";
+      "If the phone was previously paired with this PC, unpair it — Windows hides paired devices from scans. " +
+      "Use <strong>Pair</strong> on a device to link it.";
   } else {
     hintEl.innerHTML =
       "Press <strong>Start Scan</strong> to look for nearby Bluetooth devices.";
@@ -266,6 +311,15 @@ async function init() {
 
   btnScan.addEventListener("click", () => (scanning ? stopScan() : startScan()));
   btnClear.addEventListener("click", () => invoke("clear_devices").catch(console.error));
+  listEl.addEventListener("click", (event) => {
+    const button = (event.target as HTMLElement).closest<HTMLButtonElement>("button[data-action]");
+    if (!button || button.disabled) return;
+    const id = button.dataset.id;
+    const action = button.dataset.action;
+    if (id && (action === "pair" || action === "unpair")) {
+      void togglePair(id, action);
+    }
+  });
 
   setInterval(refreshTimes, 1000);
 }

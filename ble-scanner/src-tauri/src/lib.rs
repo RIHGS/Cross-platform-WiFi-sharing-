@@ -14,6 +14,8 @@ pub fn run() {
             scan::stop_scan,
             scan::get_devices,
             scan::clear_devices,
+            scan::pair_device,
+            scan::unpair_device,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

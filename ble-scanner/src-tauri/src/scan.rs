@@ -40,6 +40,7 @@ pub struct BleDevice {
     pub tx_power: Option<i16>,
     pub manufacturer_data: Vec<ManufacturerData>,
     pub service_uuids: Vec<String>,
+    pub paired: bool,
     pub last_seen: u64,
 }
 
@@ -103,6 +104,7 @@ fn to_device(id: &PeripheralId, p: &PeripheralProperties) -> BleDevice {
         tx_power: p.tx_power_level,
         manufacturer_data,
         service_uuids,
+        paired: false,
         last_seen: now_millis(),
     }
 }
@@ -132,8 +134,11 @@ async fn handle_device(
     let id_str = id.to_string();
     let mut map = cache.lock().await;
     if let Some(mut device) = device {
-        if device.name.is_none() {
-            device.name = map.get(&id_str).and_then(|d| d.name.clone());
+        if let Some(existing) = map.get(&id_str) {
+            device.paired = existing.paired;
+            if device.name.is_none() {
+                device.name = existing.name.clone();
+            }
         }
         let is_new = !map.contains_key(&id_str);
         if is_new {
@@ -151,6 +156,7 @@ async fn handle_device(
             tx_power: None,
             manufacturer_data: Vec::new(),
             service_uuids: Vec::new(),
+            paired: false,
             last_seen: now_millis(),
         };
         let _ = app.emit("ble://device", device.clone());
@@ -353,15 +359,14 @@ async fn update_services(
     }
 }
 
-async fn prune_devices(
-    cache: &tokio::sync::Mutex<HashMap<String, BleDevice>>,
-    app: &AppHandle,
-) {
+async fn prune_devices(cache: &tokio::sync::Mutex<HashMap<String, BleDevice>>, app: &AppHandle) {
     let now = now_millis();
     let stale: Vec<String> = {
         let map = cache.lock().await;
         map.iter()
-            .filter(|(_, d)| now.saturating_sub(d.last_seen) > DEVICE_TIMEOUT_SECS * 1000)
+            .filter(|(_, d)| {
+                !d.paired && now.saturating_sub(d.last_seen) > DEVICE_TIMEOUT_SECS * 1000
+            })
             .map(|(k, _)| k.clone())
             .collect()
     };
@@ -389,14 +394,14 @@ pub async fn get_adapter_info() -> Result<AdapterInfo, String> {
         .adapter_info()
         .await
         .unwrap_or_else(|_| "Unknown adapter".into());
-    Ok(AdapterInfo { name, available: true })
+    Ok(AdapterInfo {
+        name,
+        available: true,
+    })
 }
 
 #[tauri::command]
-pub async fn start_scan(
-    app: AppHandle,
-    state: State<'_, Arc<ScanManager>>,
-) -> Result<(), String> {
+pub async fn start_scan(app: AppHandle, state: State<'_, Arc<ScanManager>>) -> Result<(), String> {
     if state.scanning.load(Ordering::SeqCst) {
         return Ok(());
     }
@@ -413,13 +418,25 @@ pub async fn start_scan(
         .await
         .map_err(|e| format!("Failed to start BLE scanning: {e}"))?;
 
-    {
+    let paired_devices = {
         let mut cache = state.cache.lock().await;
+        let paired: Vec<BleDevice> = cache
+            .values()
+            .filter(|device| device.paired)
+            .cloned()
+            .collect();
         cache.clear();
-    }
+        for device in &paired {
+            cache.insert(device.id.clone(), device.clone());
+        }
+        paired
+    };
     state.name_in_flight.lock().await.clear();
     state.name_tried.lock().await.clear();
     let _ = app.emit("ble://cleared", ());
+    for device in paired_devices {
+        let _ = app.emit("ble://device", device);
+    }
 
     let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
 
@@ -438,6 +455,7 @@ pub async fn start_scan(
             Err(e) => {
                 eprintln!("failed to subscribe to BLE events: {e}");
                 scanning.store(false, Ordering::SeqCst);
+                let _ = app_inner.emit("ble://scan-state", false);
                 return;
             }
         };
@@ -479,7 +497,12 @@ pub async fn start_scan(
                             let _ = app_inner.emit("ble://adapter-state", format!("{state:?}"));
                         }
                         Some(_) => {}
-                        None => break,
+                        None => {
+                            let _ = adapter.stop_scan().await;
+                            scanning.store(false, Ordering::SeqCst);
+                            let _ = app_inner.emit("ble://scan-state", false);
+                            break;
+                        }
                     }
                 }
                 _ = prune.tick() => {
@@ -495,10 +518,7 @@ pub async fn start_scan(
 }
 
 #[tauri::command]
-pub async fn stop_scan(
-    app: AppHandle,
-    state: State<'_, Arc<ScanManager>>,
-) -> Result<(), String> {
+pub async fn stop_scan(app: AppHandle, state: State<'_, Arc<ScanManager>>) -> Result<(), String> {
     let cancel = state.cancel.lock().await.take();
     if let Some(tx) = cancel {
         let _ = tx.send(());
@@ -513,9 +533,7 @@ pub async fn stop_scan(
 }
 
 #[tauri::command]
-pub async fn get_devices(
-    state: State<'_, Arc<ScanManager>>,
-) -> Result<Vec<BleDevice>, String> {
+pub async fn get_devices(state: State<'_, Arc<ScanManager>>) -> Result<Vec<BleDevice>, String> {
     let mut devices: Vec<BleDevice> = state.cache.lock().await.values().cloned().collect();
     devices.sort_by_key(|d| -d.rssi.unwrap_or(i16::MIN));
     Ok(devices)
@@ -528,5 +546,141 @@ pub async fn clear_devices(
 ) -> Result<(), String> {
     state.cache.lock().await.clear();
     let _ = app.emit("ble://cleared", ());
+    Ok(())
+}
+
+async fn current_adapter(state: &ScanManager) -> Result<Adapter, String> {
+    if let Some(adapter) = state.adapter.lock().await.clone() {
+        return Ok(adapter);
+    }
+
+    let manager = Manager::new().await.map_err(|error| error.to_string())?;
+    manager
+        .adapters()
+        .await
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "No Bluetooth adapter found".to_string())
+}
+
+async fn find_peripheral(adapter: &Adapter, id: &str) -> Result<Peripheral, String> {
+    adapter
+        .peripherals()
+        .await
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|peripheral| peripheral.id().to_string() == id)
+        .ok_or_else(|| "device is no longer nearby; scan again and retry".to_string())
+}
+
+async fn set_paired(
+    state: &ScanManager,
+    app: &AppHandle,
+    id: &str,
+    paired: bool,
+) -> Result<BleDevice, String> {
+    let device = {
+        let mut cache = state.cache.lock().await;
+        let device = cache
+            .get_mut(id)
+            .ok_or_else(|| "device is no longer in the list".to_string())?;
+        device.paired = paired;
+        device.clone()
+    };
+
+    let _ = app.emit("ble://device-updated", device.clone());
+    Ok(device)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_unpair_device(address: u64) -> Result<(), String> {
+    use windows::Devices::Bluetooth::BluetoothLEDevice;
+    use windows::Devices::Enumeration::DeviceUnpairingResultStatus;
+
+    let device = BluetoothLEDevice::FromBluetoothAddressAsync(address)
+        .map_err(|error| format!("cannot open Bluetooth device: {error}"))?
+        .get()
+        .map_err(|error| format!("cannot open Bluetooth device: {error}"))?;
+
+    let pairing = device
+        .DeviceInformation()
+        .and_then(|information| information.Pairing())
+        .map_err(|error| format!("cannot access pairing interface: {error}"))?;
+
+    if !pairing.IsPaired().unwrap_or(false) {
+        let _ = device.Close();
+        return Ok(());
+    }
+
+    let result = pairing
+        .UnpairAsync()
+        .map_err(|error| format!("cannot start unpairing: {error}"))?
+        .get()
+        .map_err(|error| format!("unpairing failed: {error}"))?;
+    let status = result
+        .Status()
+        .map_err(|error| format!("unpairing failed: {error}"))?;
+    let _ = device.Close();
+
+    if status == DeviceUnpairingResultStatus::Unpaired
+        || status == DeviceUnpairingResultStatus::AlreadyUnpaired
+    {
+        Ok(())
+    } else {
+        Err(format!("unpairing was not completed ({status:?})"))
+    }
+}
+
+#[tauri::command]
+pub async fn pair_device(
+    app: AppHandle,
+    state: State<'_, Arc<ScanManager>>,
+    id: String,
+) -> Result<BleDevice, String> {
+    let adapter = current_adapter(&state).await?;
+    let peripheral = find_peripheral(&adapter, &id).await?;
+
+    let connect_result = if peripheral.is_connected().await.unwrap_or(false) {
+        Ok(())
+    } else {
+        match tokio::time::timeout(Duration::from_secs(20), peripheral.connect()).await {
+            Ok(result) => result.map_err(|error| error.to_string()),
+            Err(_) => Err("connection timed out".to_string()),
+        }
+    };
+
+    if let Err(error) = connect_result {
+        return Err(format!("failed to link with device: {error}"));
+    }
+
+    let _ = tokio::time::timeout(Duration::from_secs(10), peripheral.discover_services()).await;
+
+    set_paired(&state, &app, &id, true).await
+}
+
+#[tauri::command]
+pub async fn unpair_device(
+    app: AppHandle,
+    state: State<'_, Arc<ScanManager>>,
+    id: String,
+) -> Result<(), String> {
+    if let Ok(adapter) = current_adapter(&state).await {
+        if let Ok(peripheral) = find_peripheral(&adapter, &id).await {
+            #[cfg(target_os = "windows")]
+            {
+                let address = u64::from(peripheral.address());
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(20),
+                    tokio::task::spawn_blocking(move || windows_unpair_device(address)),
+                )
+                .await;
+            }
+
+            let _ = tokio::time::timeout(Duration::from_secs(5), peripheral.disconnect()).await;
+        }
+    }
+
+    set_paired(&state, &app, &id, false).await?;
     Ok(())
 }
